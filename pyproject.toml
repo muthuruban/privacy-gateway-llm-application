@@ -1,0 +1,72 @@
+[project]
+name = "privacy-gateway"
+version = "0.2.0"
+description = "Privacy gateway for PII-aware LLM prompt mediation and HMAC-authenticated audit logging (MSc dissertation prototype)"
+requires-python = ">=3.11"
+# Runtime dependency pins live in requirements.txt (which also carries
+# the spaCy model wheel URL); this table mirrors them for reference.
+dependencies = [
+    "fastapi==0.139.0",
+    "uvicorn==0.51.0",
+    "httpx==0.28.1",
+    "presidio-analyzer==2.2.363",
+    "presidio-anonymizer==2.2.363",
+    "spacy==3.8.13",
+    "pydantic==2.13.4",
+    "pydantic-settings==2.14.2",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest==9.1.1",
+    "pytest-cov==7.1.0",
+    "ruff==0.15.22",
+    "mypy==2.3.0",
+    "bandit==1.9.4",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.coverage.run]
+source = ["gateway"]
+
+[tool.coverage.report]
+show_missing = true
+fail_under = 85
+exclude_also = [
+    "if __name__ == .__main__.:",
+    "pragma: no cover",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+extend-exclude = [".venv"]
+
+[tool.ruff.lint]
+# E/W: pycodestyle, F: pyflakes, I: import order, UP: modernization,
+# B: bugbear (likely bugs), SIM: simplification.
+select = ["E", "F", "W", "I", "UP", "B", "SIM"]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests favour readable inline literals over extracted constants.
+"tests/*" = ["SIM117"]
+
+[tool.mypy]
+python_version = "3.11"
+files = ["gateway"]
+disallow_untyped_defs = true
+no_implicit_optional = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+check_untyped_defs = true
+
+[[tool.mypy.overrides]]
+# Presidio and spaCy ship no type stubs; their objects are treated as Any.
+module = ["presidio_analyzer.*", "presidio_anonymizer.*", "spacy.*"]
+ignore_missing_imports = true
+
+[tool.bandit]
+exclude_dirs = [".venv", "tests", "evaluation"]

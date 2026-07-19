@@ -1,22 +1,26 @@
 """End-to-end demo of the privacy gateway.
 
-Walks one request through every stage and prints what each boundary sees:
+Walks through every core behaviour and prints what each trust boundary
+actually sees:
 
-1. A prompt containing PII is sent to the gateway.
-2. The sanitized prompt — what the LLM provider actually receives — is
-   shown (tokenized + redacted, no raw PII).
-3. The LLM's response is shown twice: as the provider produced it (tokens
-   intact) and as the calling application receives it (rehydrated).
-4. The corresponding tamper-evident audit entry is printed.
-5. One stored entry is deliberately modified in SQLite, and
-   ``verify_chain()`` pinpoints the tampering.
+1. A prompt with tokenize/redact/allow entities is mediated; the
+   provider's view, and the response before/after rehydration, are shown.
+2. A prompt with a BLOCK-policy entity (synthetic test card number) is
+   rejected before any provider contact.
+3. The corresponding privacy-minimised audit records are shown.
+4. A stored record is tampered with directly in SQLite and
+   verify_chain() pinpoints it.
+5. The tail-deletion limitation is demonstrated honestly: deleting the
+   newest record is invisible to the internal chain, and detected only
+   against the external checkpoint.
 
-Runs fully offline against the built-in mock provider by default. Set
-GATEWAY_PROVIDER=openai (with OPENAI_API_KEY) or GATEWAY_PROVIDER=anthropic
-(with ANTHROPIC_API_KEY) to run against a real provider instead.
+Runs fully offline against the built-in mock provider by default. All
+PII values are synthetic.
 
 Usage:  python demo.py
 """
+
+from __future__ import annotations
 
 import json
 import os
@@ -26,9 +30,10 @@ import tempfile
 from fastapi.testclient import TestClient
 
 from gateway.audit_logger import AuditLogger
+from gateway.checkpoint import LocalFileCheckpointStore
 from gateway.config import Settings
 from gateway.gateway_api import create_app
-from gateway.llm_client import MockLLMClient, build_client
+from gateway.llm_client import MockLLMClient
 
 WIDTH = 74
 
@@ -41,85 +46,130 @@ def banner(title: str) -> None:
 
 
 def main() -> None:
-    # A fresh, throwaway audit DB so the demo is repeatable.
-    db_path = os.path.join(tempfile.mkdtemp(prefix="gateway-demo-"), "audit.db")
-    settings = Settings.from_env()
-    settings.audit_db_path = db_path
+    # Fresh throwaway working directory so the demo is repeatable.
+    workdir = tempfile.mkdtemp(prefix="gateway-demo-")
+    db_path = os.path.join(workdir, "audit.db")
+    checkpoint_path = os.path.join(workdir, "checkpoint.json")
 
-    audit_logger = AuditLogger(db_path=db_path, hmac_key=settings.audit_hmac_key)
-    llm_client = build_client(settings)
-    app = create_app(settings=settings, logger=audit_logger, llm_client=llm_client)
-    client = TestClient(app)
+    settings = Settings.load(
+        _env_file=None,
+        app_env="development",
+        provider="mock",
+        audit_db_path=db_path,
+        audit_checkpoint_path=checkpoint_path,
+        audit_hmac_key="demo-only-hmac-key-do-not-use-in-production",
+    )
+    checkpoint_store = LocalFileCheckpointStore(checkpoint_path)
+    audit = AuditLogger(db_path, settings.audit_hmac_key_bytes, checkpoint_store=checkpoint_store)
+    mock_provider = MockLLMClient()
+    app = create_app(settings=settings, audit_logger=audit, llm_client=mock_provider)
+    client = TestClient(app, raise_server_exceptions=False)
 
+    # ---------------------------------------------------------- 1
     prompt = (
         "Hi, I'm John Smith. Please email the contract to "
-        "john.smith@example.com or call me on +44 7911 123456. "
-        "For billing use card 4111 1111 1111 1111, and my national "
-        "insurance number is AB 12 34 56 C."
+        "john.smith@example.com or call me on +44 7911 123456. My "
+        "national insurance number is AB 12 34 56 C. Deliver it by "
+        "25 December 2025."
     )
-
-    banner("1. Original prompt (as the client application sends it)")
+    banner("1a. Original prompt (as the client application sends it)")
     print(prompt)
 
     response = client.post(
         "/v1/chat/completions",
-        json={
-            "model": os.environ.get("GATEWAY_DEMO_MODEL", "demo-model"),
-            "messages": [{"role": "user", "content": prompt}],
-        },
+        json={"model": "demo-model", "messages": [{"role": "user", "content": prompt}]},
     )
     response.raise_for_status()
-    audit_id = int(response.headers["X-Audit-Entry-Id"])
-    entry = next(e for e in audit_logger.entries() if e.id == audit_id)
 
-    banner("2. Sanitized prompt (what the LLM provider actually received)")
-    if isinstance(llm_client, MockLLMClient):
-        # The mock records exactly what crossed the provider boundary.
-        print(llm_client.requests_seen[-1]["messages"][0]["content"])
-    else:
-        print(entry.payload["sanitized_messages"][0]["content"])
+    banner("1b. Provider-safe prompt (what the LLM provider actually received)")
+    print(mock_provider.requests_seen[-1]["messages"][0]["content"])
     print()
-    print("PII findings:", json.dumps(entry.payload["pii_findings"], indent=2))
+    print("tokenize -> [[PGW_...]] placeholders (reversible, this request only)")
+    print("redact   -> [REDACTED:UK_NINO]      (irreversible)")
+    print("allow    -> the date passed through, and is recorded as allowed")
 
-    banner("3a. Provider response, before rehydration (tokens intact)")
-    print(entry.payload["sanitized_response"]["choices"][0]["message"]["content"])
-
-    banner("3b. Response delivered to the client (tokens rehydrated)")
+    banner("1c. Response delivered to the client (tokens rehydrated)")
     print(response.json()["choices"][0]["message"]["content"])
-    print()
-    print("Note: tokenized values (name, email, phone) are restored for the")
-    print("client only; blocked values (card, NINO) stay redacted forever.")
 
-    banner("4. Audit log entry (hash-chained + HMAC-signed, no raw PII)")
-    print(f"id:         {entry.id}")
-    print(f"timestamp:  {entry.timestamp}")
-    print(f"prev_hash:  {entry.prev_hash}")
-    print(f"entry_hash: {entry.entry_hash}")
-    print(f"signature:  {entry.signature}")
-    print(f"payload:    {json.dumps(entry.payload, indent=2)[:800]} ...")
+    # ---------------------------------------------------------- 2
+    banner("2. BLOCK policy: request rejected before any provider contact")
+    calls_before = len(mock_provider.requests_seen)
+    blocked = client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "demo-model",
+            "messages": [{"role": "user", "content": "Charge card 4111 1111 1111 1111 for this."}],
+        },
+    )
+    print(f"HTTP status: {blocked.status_code}")
+    print(json.dumps(blocked.json(), indent=2))
+    print(
+        f"Provider calls made for this request: {len(mock_provider.requests_seen) - calls_before}"
+    )
 
-    verification = audit_logger.verify_chain()
-    print(f"\nverify_chain(): valid={verification.valid} "
-          f"({verification.entries_checked} entries checked)")
+    # ---------------------------------------------------------- 3
+    banner("3. Audit records (privacy-minimised: metadata and hashes only)")
+    for record in audit.entries():
+        payload = record.payload
+        print(f"record {record.id}: event={payload['event']}, status={payload['status']}")
+        decisions = payload.get("policy_decisions", [])
+        for d in decisions:
+            print(f"    {d['entity_type']:<14} action={d['action']:<8} count={d['count']}")
+        if payload.get("prompt_hash"):
+            print(f"    prompt_hash:   {payload['prompt_hash'][:32]}...")
+        print(f"    record_mac:    {record.record_mac[:32]}...")
 
-    banner("5. Tampering with the stored entry - and detecting it")
-    print(f"Rewriting payload of entry {entry.id} directly in SQLite...")
-    tampered = dict(entry.payload)
-    tampered["pii_findings"] = {}  # attacker hides that PII was ever present
+    verification = audit.verify_with_store(checkpoint_store)
+    print(
+        f"\nverify: status={verification.status.value}, "
+        f"entries_checked={verification.entries_checked}, "
+        f"tail_verified={verification.tail_verified}"
+    )
+
+    # ---------------------------------------------------------- 4
+    banner("4. Tampering with a stored record - and detecting it")
+    target = audit.entries()[0]
+    tampered = dict(target.payload)
+    tampered["policy_decisions"] = []  # attacker hides that PII was found
     with sqlite3.connect(db_path) as conn:
         conn.execute(
             "UPDATE audit_log SET payload = ? WHERE id = ?",
-            (json.dumps(tampered, sort_keys=True, separators=(",", ":")), entry.id),
+            (json.dumps(tampered, sort_keys=True, separators=(",", ":")), target.id),
+        )
+    result = audit.verify_chain()
+    print(f"status:           {result.status.value}")
+    print(f"first invalid id: {result.first_invalid_id}")
+    print(f"reason:           {result.reason}")
+
+    # Restore the original payload so the chain is intact for part 5.
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "UPDATE audit_log SET payload = ? WHERE id = ?",
+            (
+                json.dumps(target.payload, sort_keys=True, separators=(",", ":")),
+                target.id,
+            ),
         )
 
-    verification = audit_logger.verify_chain()
-    print()
-    print(f"verify_chain(): valid={verification.valid}")
-    print(f"first invalid entry: {verification.first_invalid_id}")
-    print(f"reason: {verification.reason}")
+    # ---------------------------------------------------------- 5
+    banner("5. Tail deletion: the honest limitation, and the checkpoint fix")
+    with sqlite3.connect(db_path) as conn:
+        last_id = conn.execute("SELECT MAX(id) FROM audit_log").fetchone()[0]
+        conn.execute("DELETE FROM audit_log WHERE id = ?", (last_id,))
+    print(f"Deleted the newest record (id {last_id}) directly in SQLite.\n")
+
+    internal = audit.verify_chain()
+    print("Internal chain only:")
+    print(f"    status={internal.status.value} (a truncated chain is still a valid chain!)")
+    print(f"    tail_verified={internal.tail_verified}")
+
+    external = audit.verify_with_store(checkpoint_store)
+    print("Against the external checkpoint:")
+    print(f"    status={external.status.value}")
+    print(f"    reason: {external.reason}")
 
     banner("Demo complete")
-    print(f"Audit DB left at: {db_path}")
+    print(f"Working files in: {workdir}")
 
 
 if __name__ == "__main__":

@@ -4,3 +4,9 @@ __pycache__/
 *.db
 .env
 .pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+evaluation/results/
+*.zip

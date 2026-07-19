@@ -1,0 +1,143 @@
+{
+  "description": "Synthetic labelled PII cases for detection and leakage evaluation. Every value is fabricated: example.com/example.net addresses, Ofcom drama phone ranges (+44 7700 9009xx), 555-01xx US numbers, the 4111... test PAN, TEST-NET IPs, and invented names. No real personal data.",
+  "cases": [
+    {
+      "id": "email-simple",
+      "text": "Please email alice@example.com with the agenda.",
+      "entities": [{"type": "EMAIL_ADDRESS", "value": "alice@example.com"}]
+    },
+    {
+      "id": "email-two",
+      "text": "Copy bob.roberts@example.net and carol@example.com on the thread.",
+      "entities": [
+        {"type": "EMAIL_ADDRESS", "value": "bob.roberts@example.net"},
+        {"type": "EMAIL_ADDRESS", "value": "carol@example.com"}
+      ]
+    },
+    {
+      "id": "email-in-sentence",
+      "text": "My work address changed from dana@example.com to something new.",
+      "entities": [{"type": "EMAIL_ADDRESS", "value": "dana@example.com"}]
+    },
+    {
+      "id": "phone-uk-mobile",
+      "text": "Ring me on +44 7700 900123 after lunch.",
+      "entities": [{"type": "PHONE_NUMBER", "value": "+44 7700 900123"}]
+    },
+    {
+      "id": "phone-us-dashed",
+      "text": "The office line is 212-555-0142, extension 12.",
+      "entities": [{"type": "PHONE_NUMBER", "value": "212-555-0142"}]
+    },
+    {
+      "id": "phone-international",
+      "text": "Call +1 415 555 0100 if the deployment fails.",
+      "entities": [{"type": "PHONE_NUMBER", "value": "+1 415 555 0100"}]
+    },
+    {
+      "id": "person-simple",
+      "text": "John Smith will chair the meeting.",
+      "entities": [{"type": "PERSON", "value": "John Smith"}]
+    },
+    {
+      "id": "person-two",
+      "text": "Alice Johnson introduced Bob Roberts to the committee.",
+      "entities": [
+        {"type": "PERSON", "value": "Alice Johnson"},
+        {"type": "PERSON", "value": "Bob Roberts"}
+      ]
+    },
+    {
+      "id": "person-possessive",
+      "text": "We reviewed Sarah Wilson's proposal in detail.",
+      "entities": [{"type": "PERSON", "value": "Sarah Wilson"}]
+    },
+    {
+      "id": "nino-spaced",
+      "text": "My national insurance number is AB 12 34 56 C.",
+      "entities": [{"type": "UK_NINO", "value": "AB 12 34 56 C"}]
+    },
+    {
+      "id": "nino-compact",
+      "text": "Record NINO CE123456A against the claim.",
+      "entities": [{"type": "UK_NINO", "value": "CE123456A"}]
+    },
+    {
+      "id": "card-visa-test",
+      "text": "Charge it to 4111 1111 1111 1111 as usual.",
+      "entities": [{"type": "CREDIT_CARD", "value": "4111 1111 1111 1111"}]
+    },
+    {
+      "id": "card-mastercard-test",
+      "text": "The card on file is 5555 5555 5555 4444.",
+      "entities": [{"type": "CREDIT_CARD", "value": "5555 5555 5555 4444"}]
+    },
+    {
+      "id": "ssn-dashed",
+      "text": "Applicant SSN 856-45-6789 was provided on the form.",
+      "entities": [{"type": "US_SSN", "value": "856-45-6789"}]
+    },
+    {
+      "id": "ip-testnet",
+      "text": "The probe came from 192.0.2.44 overnight.",
+      "entities": [{"type": "IP_ADDRESS", "value": "192.0.2.44"}]
+    },
+    {
+      "id": "iban-uk-example",
+      "text": "Send the refund to GB82 WEST 1234 5698 7654 32 please.",
+      "entities": [{"type": "IBAN_CODE", "value": "GB82 WEST 1234 5698 7654 32"}]
+    },
+    {
+      "id": "location-city",
+      "text": "The conference moved from Manchester to Edinburgh.",
+      "entities": [
+        {"type": "LOCATION", "value": "Manchester"},
+        {"type": "LOCATION", "value": "Edinburgh"}
+      ]
+    },
+    {
+      "id": "date-explicit",
+      "text": "The audit is scheduled for 25 December 2025.",
+      "entities": [{"type": "DATE_TIME", "value": "25 December 2025"}]
+    },
+    {
+      "id": "mixed-support-ticket",
+      "text": "I'm John Smith, email john.smith@example.com, call +44 7700 900456 about my order.",
+      "entities": [
+        {"type": "PERSON", "value": "John Smith"},
+        {"type": "EMAIL_ADDRESS", "value": "john.smith@example.com"},
+        {"type": "PHONE_NUMBER", "value": "+44 7700 900456"}
+      ]
+    },
+    {
+      "id": "mixed-hr-record",
+      "text": "Alice Johnson (alice.johnson@example.com) moved to Leeds; NINO CE 12 34 56 A.",
+      "entities": [
+        {"type": "PERSON", "value": "Alice Johnson"},
+        {"type": "EMAIL_ADDRESS", "value": "alice.johnson@example.com"},
+        {"type": "LOCATION", "value": "Leeds"},
+        {"type": "UK_NINO", "value": "CE 12 34 56 A"}
+      ]
+    },
+    {
+      "id": "clean-technical",
+      "text": "Explain the difference between optimistic and pessimistic locking.",
+      "entities": []
+    },
+    {
+      "id": "clean-recipe",
+      "text": "Whisk the eggs with sugar until pale, then fold in the flour.",
+      "entities": []
+    },
+    {
+      "id": "clean-code-question",
+      "text": "Why does my recursive function overflow the stack for large inputs?",
+      "entities": []
+    },
+    {
+      "id": "clean-generic-business",
+      "text": "Draft a short summary of quarterly revenue trends for the board.",
+      "entities": []
+    }
+  ]
+}

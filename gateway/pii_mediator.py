@@ -1,38 +1,47 @@
-"""PII mediation: detection, policy-driven sanitization, and rehydration.
+"""
+Module purpose
+--------------
 
-Wraps Microsoft Presidio (analyzer + anonymizer). For every piece of text
-on the outbound path:
+Detect PII in text (Microsoft Presidio + a custom UK National Insurance
+number recognizer) and apply the configured privacy policy: tokenize,
+redact, allow — with BLOCK handled by the caller before any text is
+transformed.
 
-1. The Presidio ``AnalyzerEngine`` detects PII entities.
-2. Each detected entity is handled according to the configured policy:
-   * ``tokenize`` → replaced with a reversible placeholder such as
-     ``[[EMAIL_ADDRESS_1]]``. The placeholder→value mapping is returned to
-     the caller and held only in memory for the single request.
-   * ``block``    → replaced with an irreversible ``[REDACTED:TYPE]`` marker.
-   * ``allow``    → left untouched (the entity is not even requested from
-     the analyzer).
-3. On the inbound path, ``rehydrate`` substitutes the placeholders in the
-   LLM's response back to the original values — for the calling
-   application only. The LLM provider never sees the real values.
+Security responsibility
+-----------------------
 
-The same original value is always mapped to the same token within one
-request, so the LLM can reason about "[[PERSON_1]]" as a stable referent.
+* Detection covers *every* entity type in the policy, including ALLOW
+  entities, so the audit trail can distinguish "no PII found" from "PII
+  found and deliberately allowed".
+* Tokenization goes through the request-scoped TokenizationContext, so
+  values in different messages of one request can never collide.
+* Redaction is irreversible by construction: no mapping is kept.
+
+Important limitation
+--------------------
+
+Detection is statistical. Recognizers miss entities (false negatives)
+and mislabel text (false positives); anything the detector misses is
+forwarded untouched regardless of policy. This limitation is inherited
+by every guarantee built on top of this module.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from typing import Any
 
-from presidio_analyzer import AnalyzerEngine, Pattern, PatternRecognizer
+from presidio_analyzer import AnalyzerEngine, Pattern, PatternRecognizer, RecognizerResult
 from presidio_analyzer.nlp_engine import NlpEngineProvider
 from presidio_anonymizer import AnonymizerEngine
 from presidio_anonymizer.entities import OperatorConfig
 
-from .config import PolicyAction
+from .policy import DEFAULT_POLICY, PolicyAction
+from .tokenization import TokenizationContext
 
-# UK National Insurance number, e.g. "QQ 12 34 56 C". Not shipped with
-# Presidio, so registered as a custom recognizer — this also demonstrates
-# how the gateway's entity coverage is extended.
+# UK National Insurance number, e.g. "AB 12 34 56 C". Not shipped with
+# Presidio, so registered as a custom recognizer. The prefix letter
+# classes follow HMRC allocation rules (D, F, I, Q, U, V never appear),
+# which is why the well-known example "QQ 12 34 56 C" is *not* matched.
 _UK_NINO_PATTERN = Pattern(
     name="uk_nino",
     regex=r"\b[A-CEGHJ-PR-TW-Z][A-CEGHJ-NPR-TW-Z]\s?\d{2}\s?\d{2}\s?\d{2}\s?[A-D]\b",
@@ -49,29 +58,17 @@ def _build_uk_nino_recognizer() -> PatternRecognizer:
     )
 
 
-@dataclass
-class SanitizationResult:
-    """Outcome of sanitizing one piece of text."""
-
-    text: str
-    #: token → original value, for reversible (tokenized) entities only.
-    mapping: dict[str, str] = field(default_factory=dict)
-    #: entity_type → {"action": ..., "count": ...} — safe to persist in the
-    #: audit log because it contains no raw PII values.
-    findings: dict[str, dict] = field(default_factory=dict)
-
-
 class PIIMediator:
-    """Policy-driven PII sanitizer/rehydrator built on Presidio."""
+    """Policy-driven PII detector and sanitizer built on Presidio."""
 
     def __init__(
         self,
-        policy: dict[str, PolicyAction],
+        policy: dict[str, PolicyAction] | None = None,
         score_threshold: float = 0.4,
         language: str = "en",
         spacy_model: str = "en_core_web_sm",
-    ):
-        self.policy = policy
+    ) -> None:
+        self.policy = dict(policy) if policy is not None else dict(DEFAULT_POLICY)
         self.score_threshold = score_threshold
         self.language = language
 
@@ -81,96 +78,132 @@ class PIIMediator:
                 "models": [{"lang_code": language, "model_name": spacy_model}],
             }
         ).create_engine()
-        self.analyzer = AnalyzerEngine(
-            nlp_engine=nlp_engine, supported_languages=[language]
-        )
+        self.analyzer = AnalyzerEngine(nlp_engine=nlp_engine, supported_languages=[language])
         self.analyzer.registry.add_recognizer(_build_uk_nino_recognizer())
         self.anonymizer = AnonymizerEngine()
 
-    def sanitize(self, text: str) -> SanitizationResult:
-        """Detect PII in ``text`` and apply the configured policy."""
-        # Only ask the analyzer for entity types the policy acts on.
-        active_entities = [
-            entity
-            for entity, action in self.policy.items()
-            if action is not PolicyAction.ALLOW
-        ]
-        if not active_entities or not text:
-            return SanitizationResult(text=text)
+    def clone_with_policy(self, policy: dict[str, PolicyAction]) -> PIIMediator:
+        """A mediator with a different policy that shares the (expensive)
+        NLP engines. The engines are stateless between calls."""
+        clone = object.__new__(PIIMediator)
+        clone.policy = dict(policy)
+        clone.score_threshold = self.score_threshold
+        clone.language = self.language
+        clone.analyzer = self.analyzer
+        clone.anonymizer = self.anonymizer
+        return clone
 
-        analyzer_results = self.analyzer.analyze(
+    def analyze(self, text: str) -> list[RecognizerResult]:
+        """
+        Detect every policy-listed entity type in ``text``.
+
+        Security reason:
+            ALLOW entities are deliberately included in the requested
+            entity list. Excluding them would make "PII knowingly crossed
+            the boundary" indistinguishable from "no PII detected" in the
+            audit evidence.
+        """
+        if not text:
+            return []
+        return self.analyzer.analyze(
             text=text,
-            entities=active_entities,
+            entities=list(self.policy),
             language=self.language,
             score_threshold=self.score_threshold,
         )
-        if not analyzer_results:
-            return SanitizationResult(text=text)
 
-        mapping: dict[str, str] = {}       # token → original value
-        value_to_token: dict[tuple[str, str], str] = {}  # (type, value) → token
-        counters: dict[str, int] = {}      # entity type → next token index
-        findings: dict[str, dict] = {}
+    def apply(
+        self,
+        text: str,
+        results: list[RecognizerResult],
+        context: TokenizationContext | None,
+    ) -> str:
+        """
+        Transform ``text`` according to policy: tokenize and redact spans.
 
-        def _tokenize(entity_type: str):
-            """Build a per-entity-type operator that mints reversible tokens."""
+        ALLOW detections are left untouched (they only feed the audit
+        record). BLOCK detections must have been handled by the caller —
+        finding one here means the block check was bypassed, so this
+        method fails closed rather than quietly redacting.
 
-            def _operator(original: str) -> str:
-                key = (entity_type, original)
-                if key not in value_to_token:
-                    counters[entity_type] = counters.get(entity_type, 0) + 1
-                    token = f"[[{entity_type}_{counters[entity_type]}]]"
-                    value_to_token[key] = token
-                    mapping[token] = original
-                return value_to_token[key]
+        Args:
+            text: original message text.
+            results: detections from :meth:`analyze` on the same text.
+            context: the request's shared tokenization context. Required
+                when any TOKENIZE entity is present.
 
-            return _operator
+        Returns:
+            The provider-safe text.
+
+        Raises:
+            RuntimeError: if a BLOCK-policy detection reaches this method,
+                or a TOKENIZE detection arrives without a context.
+        """
+        actionable = []
+        for result in results:
+            action = self.policy.get(result.entity_type)
+            if action is PolicyAction.BLOCK:
+                # Security note: BLOCK is not redaction. Reaching this
+                # point means the request should already have been
+                # rejected; continuing would weaken BLOCK to REDACT.
+                raise RuntimeError("BLOCK-policy entity reached sanitization")
+            if action in (PolicyAction.TOKENIZE, PolicyAction.REDACT):
+                actionable.append(result)
+
+        if not actionable:
+            return text
 
         operators: dict[str, OperatorConfig] = {}
-        for entity in active_entities:
-            if self.policy[entity] is PolicyAction.TOKENIZE:
-                operators[entity] = OperatorConfig(
-                    "custom", {"lambda": _tokenize(entity)}
+        for entity_type in {r.entity_type for r in actionable}:
+            if self.policy[entity_type] is PolicyAction.TOKENIZE:
+                if context is None:
+                    raise RuntimeError("TOKENIZE requires a TokenizationContext")
+                operators[entity_type] = OperatorConfig(
+                    "custom", {"lambda": self._make_tokenizer(entity_type, context)}
                 )
-            else:  # PolicyAction.BLOCK — irreversible, no mapping kept.
-                operators[entity] = OperatorConfig(
-                    "replace", {"new_value": f"[REDACTED:{entity}]"}
+            else:
+                operators[entity_type] = OperatorConfig(
+                    "replace", {"new_value": f"[REDACTED:{entity_type}]"}
                 )
 
+        # Passing analyzer results to the anonymizer is Presidio's
+        # documented usage; its type stubs declare a stricter (internal)
+        # result class, hence the targeted ignore.
         anonymized = self.anonymizer.anonymize(
-            text=text, analyzer_results=analyzer_results, operators=operators
+            text=text,
+            analyzer_results=actionable,  # type: ignore[arg-type]
+            operators=operators,
         )
-
-        # Summarize what was found, without recording any raw values.
-        for result in analyzer_results:
-            entry = findings.setdefault(
-                result.entity_type,
-                {"action": self.policy[result.entity_type].value, "count": 0},
-            )
-            entry["count"] += 1
-
-        return SanitizationResult(text=anonymized.text, mapping=mapping, findings=findings)
+        return str(anonymized.text)
 
     @staticmethod
-    def rehydrate(text: str, mapping: dict[str, str]) -> str:
-        """Replace placeholder tokens in ``text`` with their original values.
+    def _make_tokenizer(entity_type: str, context: TokenizationContext) -> Any:
+        """Per-entity-type operator that mints tokens from the shared
+        request context (Presidio's custom operator passes only the
+        matched text, so the entity type is bound via this closure)."""
 
-        Used on the LLM's response before it is returned to the calling
-        application. Blocked (redacted) entities have no mapping entry and
-        therefore stay redacted forever.
+        def _operator(original: str) -> str:
+            return context.token_for(entity_type, original)
+
+        return _operator
+
+    def redact_all(self, text: str, results: list[RecognizerResult]) -> str:
         """
-        for token, original in mapping.items():
-            text = text.replace(token, original)
-        return text
+        Irreversibly redact *every* detection, regardless of action.
 
-    @staticmethod
-    def merge_findings(per_message: list[dict[str, dict]]) -> dict[str, dict]:
-        """Combine findings from several sanitized texts into one summary."""
-        merged: dict[str, dict] = {}
-        for findings in per_message:
-            for entity_type, info in findings.items():
-                entry = merged.setdefault(
-                    entity_type, {"action": info["action"], "count": 0}
-                )
-                entry["count"] += info["count"]
-        return merged
+        Used only for the optional research/debug audit-content mode: if
+        content is stored at all, every detected entity is removed first.
+        Undetected entities can still remain — see module header.
+        """
+        if not results:
+            return text
+        operators = {
+            entity_type: OperatorConfig("replace", {"new_value": f"[REDACTED:{entity_type}]"})
+            for entity_type in {r.entity_type for r in results}
+        }
+        anonymized = self.anonymizer.anonymize(
+            text=text,
+            analyzer_results=results,  # type: ignore[arg-type]
+            operators=operators,
+        )
+        return str(anonymized.text)
