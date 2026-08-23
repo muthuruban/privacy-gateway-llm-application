@@ -61,6 +61,7 @@ from .errors import (
     GatewayError,
     PolicyBlockedError,
     ProviderResponseError,
+    ResponseScanFailureError,
 )
 from .llm_client import LLMClient, build_client
 from .logging_utils import configure_safe_logging
@@ -221,6 +222,22 @@ def create_app(
             ),
         )
 
+    @app.middleware("http")
+    async def _clear_request_token_context(request: Request, call_next: Any) -> Any:
+        """Clear request-scoped token mappings on every exit path.
+
+        The chat handler registers its context on ``request.state`` as soon
+        as it is created. This finalizer therefore runs for successful,
+        blocked, provider-error, audit-error, and response-scan-error paths
+        without duplicating cleanup logic in each branch.
+        """
+        try:
+            return await call_next(request)
+        finally:
+            token_context = getattr(request.state, "token_context", None)
+            if token_context is not None:
+                token_context.clear()
+
     def require_admin(request: Request) -> None:
         """
         Gate for audit endpoints.
@@ -267,6 +284,7 @@ def create_app(
         try:
             texts = [m.content for m in body.messages]
             token_context = TokenizationContext("\n".join(texts))
+            request.state.token_context = token_context
             per_message_results = [mediator.analyze(text) for text in texts]
             decisions = build_decisions(
                 (
@@ -404,10 +422,29 @@ def create_app(
                         )
                 response_scanned = True
             except Exception as exc:
-                # Fail closed: an unscanned response must not be returned
-                # when the operator asked for scanning.
+                # The provider has already been contacted at this stage.
+                # Withhold the unscanned response, record that distinction
+                # explicitly, and return a fixed privacy-safe error.
+                _audit_safe(
+                    audit,
+                    {
+                        **_base_payload(),
+                        "event": "response_scan_failure",
+                        "status": "error",
+                        "request_blocked": False,
+                        "response_status": 500,
+                        "error_code": ErrorCode.RESPONSE_SCAN_FAILURE.value,
+                        "policy_decisions": [d.model_dump() for d in decisions],
+                        "prompt_hash": prompt_hash,
+                        "response_hash": response_hash,
+                        "provider_duration_ms": provider_duration_ms,
+                        "response_scanned": False,
+                        "provider_contacted": True,
+                        "response_returned_to_client": False,
+                    },
+                )
                 logger.warning("response_scan_failure request_id=%s", request_id)
-                raise DetectorFailureError() from exc
+                raise ResponseScanFailureError() from exc
 
         audit_payload: dict[str, Any] = {
             **_base_payload(),
@@ -449,8 +486,6 @@ def create_app(
                 content = choice.get("message", {}).get("content")
                 if isinstance(content, str):
                     choice["message"]["content"] = token_context.rehydrate(content)
-        token_context.clear()
-
         logger.info(
             "chat_completion request_id=%s status=ok duration_ms=%s",
             request_id,

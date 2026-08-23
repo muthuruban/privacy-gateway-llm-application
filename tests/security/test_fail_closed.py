@@ -8,8 +8,10 @@ from types import SimpleNamespace
 
 import pytest
 
+from gateway import gateway_api
 from gateway.errors import AuditWriteError, ProviderTimeoutError
 from gateway.policy import DEFAULT_POLICY
+from gateway.tokenization import TokenizationContext
 from tests.conftest import post_chat
 
 
@@ -65,6 +67,37 @@ class TestDetectorFailure:
         assert "apply.victim@example.com" not in _db_text(audit)
 
 
+class TestResponseScanFailure:
+    def test_failure_after_provider_contact_is_audited_truthfully(self, gateway_factory, caplog):
+        class BrokenResponseMediator:
+            def analyze(self, text):
+                raise RuntimeError("scan failed near generated.secret@example.net")
+
+            def apply(self, text, results, context):  # pragma: no cover - analyze raises first
+                return text
+
+        client, mock, audit = gateway_factory(
+            response_scan_enabled=True,
+            responder=lambda model, messages: "Contact generated.secret@example.net",
+        )
+        client.app.state.response_mediator = BrokenResponseMediator()
+
+        with caplog.at_level("DEBUG"):
+            response = post_chat(client, content="No personal information here.")
+
+        assert response.status_code == 500
+        assert response.json()["error"]["code"] == "PGW-RESPONSE-SCAN-FAILURE"
+        assert "not sent to the provider" not in response.text
+        assert len(mock.requests_seen) == 1
+        record = audit.latest()
+        assert record.payload["event"] == "response_scan_failure"
+        assert record.payload["provider_contacted"] is True
+        assert record.payload["response_returned_to_client"] is False
+        assert "generated.secret@example.net" not in response.text
+        assert "generated.secret@example.net" not in _db_text(audit)
+        assert "generated.secret@example.net" not in caplog.text
+
+
 class TestProviderFailure:
     def test_timeout_becomes_safe_error_with_audit_record(self, gateway_factory):
         class TimeoutProvider:
@@ -78,6 +111,27 @@ class TestProviderFailure:
         record = audit.latest()
         assert record.payload["event"] == "provider_error"
         assert record.payload["error_code"] == "PGW-PROVIDER-TIMEOUT"
+
+    def test_token_context_is_cleared_when_provider_fails(self, gateway_factory, monkeypatch):
+        contexts = []
+
+        class TrackingTokenizationContext(TokenizationContext):
+            def __init__(self, request_text=""):
+                super().__init__(request_text)
+                contexts.append(self)
+
+        class TimeoutProvider:
+            async def chat(self, model, messages, **params):
+                raise ProviderTimeoutError()
+
+        monkeypatch.setattr(gateway_api, "TokenizationContext", TrackingTokenizationContext)
+        client, _, _ = gateway_factory(llm_client=TimeoutProvider())
+        response = post_chat(client, content="Email alice@example.com about the report.")
+
+        assert response.status_code == 504
+        assert len(contexts) == 1
+        assert len(contexts[0]) == 0
+        assert contexts[0].token_to_value == {}
 
 
 class TestAuditFailure:

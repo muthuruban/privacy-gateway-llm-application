@@ -37,6 +37,7 @@ class ErrorCode(StrEnum):
     PROVIDER_AUTH = "PGW-PROVIDER-AUTH"
     PROVIDER_RESPONSE = "PGW-PROVIDER-RESPONSE"
     DETECTOR_FAILURE = "PGW-DETECTOR-FAILURE"
+    RESPONSE_SCAN_FAILURE = "PGW-RESPONSE-SCAN-FAILURE"
     AUDIT_WRITE = "PGW-AUDIT-WRITE"
     CONFIG_INVALID = "PGW-CONFIG-INVALID"
 
@@ -115,6 +116,24 @@ class DetectorFailureError(GatewayError):
     code = ErrorCode.DETECTOR_FAILURE
     http_status = 500
     safe_message = "Privacy mediation failed; the request was not sent to the provider."
+    category = "privacy"
+
+
+class ResponseScanFailureError(GatewayError):
+    """Raised when configured provider-response privacy scanning fails.
+
+    The provider has already been called at this stage, so this error is
+    intentionally distinct from request-side detector failure. The failed
+    response is withheld from the client and the audit record states that
+    provider contact already occurred.
+    """
+
+    code = ErrorCode.RESPONSE_SCAN_FAILURE
+    http_status = 500
+    safe_message = (
+        "Privacy scanning of the provider response failed; the response was not returned "
+        "to the client."
+    )
     category = "privacy"
 
 

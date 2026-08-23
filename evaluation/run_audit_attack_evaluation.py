@@ -170,6 +170,30 @@ def _scenarios() -> list[dict[str, Any]]:
         )
 
     rollback()
+
+    # A legitimate historical checkpoint verifies the chain only through
+    # that record. It must not be reported as proof of a newer current tail.
+    logger, _ = _fresh_logger(records=3)
+    stale_checkpoint: AuditCheckpoint = logger.create_checkpoint()  # type: ignore[assignment]
+    logger.append({"note": "record 4"})
+    logger.append({"note": "record 5"})
+    internal = logger.verify_chain()
+    with_cp = logger.verify_chain(stale_checkpoint)
+    stale_ok = with_cp.status.value == "valid" and with_cp.tail_verified is False
+    scenarios.append(
+        {
+            "scenario": "stale_checkpoint_current_tail",
+            "expected_internal_status": "valid",
+            "observed_internal_status": internal.status.value,
+            "observed_first_invalid_id": internal.first_invalid_id,
+            "internal_matches_expectation": internal.status.value == "valid",
+            "expected_with_checkpoint": "valid",
+            "observed_with_checkpoint": with_cp.status.value,
+            "expected_tail_verified": False,
+            "observed_tail_verified": with_cp.tail_verified,
+            "checkpoint_matches_expectation": stale_ok,
+        }
+    )
     return scenarios
 
 

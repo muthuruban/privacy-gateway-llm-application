@@ -332,9 +332,10 @@ class AuditLogger:
 
         Args:
             checkpoint: externally stored expectation about the tail.
-                When given, the record it names must exist with a
-                matching MAC; a shorter chain is reported as invalid
-                (tail deletion or rollback).
+                The record it names must exist with a matching MAC. Only
+                a checkpoint for the current newest record verifies the
+                current tail; an older valid checkpoint verifies history
+                only up to that record.
 
         Returns:
             ChainVerificationResult; ``entries_checked`` is the number of
@@ -419,6 +420,17 @@ class AuditLogger:
                     checkpoint.last_record_id,
                     "the record named by the external checkpoint has a different MAC"
                     " (rewritten history or checkpoint mismatch)",
+                )
+            latest_id = int(rows[-1][0])
+            if checkpoint.last_record_id != latest_id:
+                return ChainVerificationResult(
+                    ChainStatus.VALID,
+                    checked,
+                    None,
+                    "the external checkpoint verifies history through record "
+                    f"{checkpoint.last_record_id}, but the current tail is record {latest_id}; "
+                    "the checkpoint is stale and does not verify the current tail",
+                    tail_verified=False,
                 )
             return ChainVerificationResult(ChainStatus.VALID, checked, tail_verified=True)
 

@@ -182,6 +182,18 @@ class TestDocumentedLimitations:
         assert result.status is ChainStatus.INVALID
         assert "tail deletion" in result.reason
 
+    def test_stale_checkpoint_does_not_verify_current_tail(self, logger):
+        _populate(logger, 3)
+        checkpoint = logger.create_checkpoint()
+        _populate(logger, 2)
+
+        result = logger.verify_chain(checkpoint)
+
+        assert result.status is ChainStatus.VALID
+        assert result.entries_checked == 5
+        assert result.tail_verified is False
+        assert "stale" in result.reason
+
     def test_multiple_trailing_deletion_with_and_without_checkpoint(self, logger):
         _populate(logger, 5)
         checkpoint = logger.create_checkpoint()
