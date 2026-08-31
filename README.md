@@ -1,245 +1,438 @@
 # Privacy Gateway for PII-Aware LLM Prompt Mediation and HMAC-Authenticated Audit Logging
 
-An MSc Cybersecurity dissertation prototype: a provider-agnostic gateway
-that sits between a client application and an external LLM provider
-(OpenAI, Anthropic, or an offline mock). On every request it performs:
+An MSc Cybersecurity dissertation prototype: a provider-agnostic privacy gateway that sits between a client application and an external LLM provider (OpenAI-compatible, Anthropic, or an offline mock).
 
-1. **PII-aware prompt mediation** — Microsoft Presidio detection plus a
-   configurable per-entity policy with four distinct actions: `allow`
-   (pass through, but record it), `tokenize` (reversible request-scoped
-   placeholder), `redact` (irreversible replacement), and `block`
-   (reject the whole request before any provider contact).
-2. **HMAC-authenticated audit logging** — a hash-chained, tamper-evident
-   audit log storing privacy-minimised metadata only (entity types,
-   actions, counts, content hashes — never prompts, responses, raw PII,
-   or token mappings).
+On each request it performs:
 
-> **Scope:** this is *a limited OpenAI-style text chat endpoint for the
-> dissertation prototype*. It is **not** OpenAI-API compatible, not a
-> hardened product, and **no production-readiness claim is made**.
+1. **PII-aware prompt mediation** using Microsoft Presidio plus a configurable per-entity policy with four actions:
+   - `allow` - pass the value through unchanged, but record the decision.
+   - `tokenize` - replace the value with a reversible request-scoped placeholder.
+   - `redact` - replace the value irreversibly.
+   - `block` - reject the entire request before provider contact.
+2. **HMAC-authenticated audit logging** using a hash-chained, tamper-evident audit log that stores privacy-minimised metadata rather than complete prompts, responses, raw PII, or token mappings.
 
+> **Scope:** this is a limited OpenAI-style text chat endpoint developed as a dissertation research prototype. It is **not** a complete OpenAI-compatible API, not a hardened production product, and no production-readiness claim is made.
+
+```text
+Client App -> Gateway (detect -> policy -> tokenize/redact/allow|block -> adapter) -> LLM Provider
+                         |
+                         v
+             Tamper-evident audit store (SQLite)
+                         |
+                         v
+                  External checkpoint
 ```
-Client App → Gateway (detect → policy → tokenize/redact/allow|block → adapter) → LLM Provider
-                          ↓
-             Tamper-evident audit store (SQLite) + external checkpoint
+
+Detailed design documents are available in [`docs/`](docs/):
+
+- [ARCHITECTURE](docs/ARCHITECTURE.md)
+- [THREAT_MODEL](docs/THREAT_MODEL.md)
+- [SECURITY_GUARANTEES](docs/SECURITY_GUARANTEES.md)
+- [EVALUATION_GUIDE](docs/EVALUATION_GUIDE.md)
+- [AI_USE_DECLARATION_TEMPLATE](docs/AI_USE_DECLARATION_TEMPLATE.md)
+
+## Final evaluated dissertation revision
+
+The quantitative dissertation evaluation was executed against:
+
+```text
+Commit: 0c047e040ea745509f894fb5ffca86968ae985f6
+Python: 3.12.0
 ```
 
-Detailed design documents live in [docs/](docs/):
-[ARCHITECTURE](docs/ARCHITECTURE.md) ·
-[THREAT_MODEL](docs/THREAT_MODEL.md) ·
-[SECURITY_GUARANTEES](docs/SECURITY_GUARANTEES.md) ·
-[EVALUATION_GUIDE](docs/EVALUATION_GUIDE.md) ·
-[AI_USE_DECLARATION_TEMPLATE](docs/AI_USE_DECLARATION_TEMPLATE.md)
+This commit is the **frozen evaluated implementation** referenced by the dissertation and generated evaluation outputs.
 
-## Layout
+Later commits may update documentation such as this README without changing the evaluated implementation. Such documentation-only commits should **not** replace the evaluated commit identifier above unless the implementation is changed and the complete evaluation is rerun.
+
+### Final evaluation summary
+
+| Evaluation | Final result |
+|---|---|
+| Automated tests | 165 passed |
+| Statement coverage | 96.10% |
+| Ruff lint | Passed |
+| Ruff formatting | Passed |
+| Mypy | No issues in 11 source files |
+| Bandit | No findings |
+| Detection dataset | 24 synthetic cases |
+| Detection precision | 0.7647 |
+| Detection recall | 0.9286 |
+| Detection F1 | 0.8387 |
+| Leakage evaluation | 112 checks |
+| Mediation failures | 0 |
+| Detector false-negative appearances | 4 appearances caused by 2 missed telephone values |
+| Explicitly allowed appearances | 2 |
+| Full gateway + audit latency | 19.08 ms median |
+| Full gateway + audit p95 | 26.69 ms |
+| Audit-integrity evaluation | 13 scenarios; all matched documented expected behaviour |
+
+The reported dissertation measurements use the offline mock provider and therefore measure the gateway's own behaviour and local processing overhead rather than live commercial-provider network latency.
+
+## Repository layout
 
 | Path | Purpose |
 |---|---|
-| `gateway/pii_mediator.py` | Presidio wrapper: detection (incl. allowed entities), tokenize/redact application, custom UK NINO recognizer |
-| `gateway/tokenization.py` | Request-scoped token context: high-entropy namespace, collision-free minting, exact-match rehydration |
-| `gateway/policy.py` | Four-action policy model, decision records, policy file loading |
-| `gateway/audit_logger.py` | Hash-chained + HMAC-authenticated SQLite log, `verify_chain()`, concurrency-safe appends |
-| `gateway/checkpoint.py` | External checkpoint abstraction (tail-deletion/rollback detection) + local demo store |
-| `gateway/llm_client.py` | Provider adapters (OpenAI, Anthropic, offline mock) behind one interface, typed errors |
-| `gateway/gateway_api.py` | FastAPI orchestration: strict request models, fail-closed pipeline, admin-gated audit endpoints |
-| `gateway/config.py` | Pydantic Settings: environment-validated configuration, secrets from env only |
-| `gateway/errors.py` | Safe internal error codes (`PGW-*`) and typed exceptions |
-| `tests/unit` · `tests/integration` · `tests/security` | 162 automated tests (see below) |
-| `evaluation/` | Reproducible dissertation evaluation utilities |
-| `demo.py` | Scripted end-to-end walkthrough including tamper and tail-deletion demos |
+| `gateway/pii_mediator.py` | Presidio wrapper: detection, configured transformations, and custom UK NINO recognition |
+| `gateway/tokenization.py` | Request-scoped token context: high-entropy namespace, collision-resistant minting, exact-match restoration, lifecycle cleanup |
+| `gateway/policy.py` | Four-action policy model, decision records, and policy-file loading |
+| `gateway/audit_logger.py` | Hash-chained and HMAC-authenticated SQLite audit log with chain verification and concurrency-safe appends |
+| `gateway/checkpoint.py` | Checkpoint abstraction for tail-deletion and rollback verification plus local demonstration store |
+| `gateway/llm_client.py` | OpenAI-compatible, Anthropic, and offline mock provider adapters behind a common interface |
+| `gateway/gateway_api.py` | FastAPI orchestration, strict request models, fail-closed processing, response scanning, and admin-gated audit endpoints |
+| `gateway/config.py` | Environment-validated Pydantic Settings configuration |
+| `gateway/errors.py` | Safe internal `PGW-*` error codes and typed exceptions |
+| `tests/unit` | Unit tests |
+| `tests/integration` | Integration and API-pipeline tests |
+| `tests/security` | Security and adversarial tests |
+| `evaluation/run_detection_evaluation.py` | Labelled PII-detection evaluation |
+| `evaluation/run_leakage_evaluation.py` | Provider/output/audit/log/error leakage evaluation |
+| `evaluation/run_latency_benchmark.py` | Local latency benchmark |
+| `evaluation/run_audit_attack_evaluation.py` | Audit-tampering and checkpoint evaluation |
+| `evaluation/datasets/` | Synthetic evaluation data |
+| `demo.py` | Scripted end-to-end demonstration |
 
 ## Supported Python
 
-Developed and verified on Python 3.12; the codebase targets **3.11+**
-(CI runs 3.11 and 3.12).
+Developed and finally evaluated on **Python 3.12.0**.
+
+The codebase targets Python **3.11+** and CI is configured for Python 3.11 and 3.12.
 
 ## Installation
 
 ```bash
 python -m venv .venv
-# Windows:      .venv\Scripts\activate
-# macOS/Linux:  source .venv/bin/activate
-pip install -r requirements.txt          # runtime (includes spaCy model)
-pip install -r requirements-dev.txt      # tests + quality tooling
 ```
 
-> **Windows + antivirus TLS scanning:** if `pip install` fails with
-> `CERTIFICATE_VERIFY_FAILED` and you run an antivirus that inspects
-> HTTPS (e.g. Avast), point pip at its CA bundle instead of disabling
-> verification, e.g.
-> `$env:PIP_CERT = 'C:\ProgramData\Avast Software\Avast\wscert.pem'`.
+Activate the environment:
+
+```powershell
+# Windows PowerShell
+.venv\Scripts\Activate.ps1
+```
+
+```bash
+# macOS/Linux
+source .venv/bin/activate
+```
+
+Install dependencies:
+
+```bash
+pip install -r requirements.txt
+pip install -r requirements-dev.txt
+```
+
+The runtime requirements include the spaCy model used by Presidio.
+
+> **Windows and antivirus TLS inspection:** if `pip install` fails with `CERTIFICATE_VERIFY_FAILED` because local antivirus software is intercepting HTTPS, configure pip to use the antivirus CA bundle rather than disabling certificate verification.
 
 ## Configuration
 
-All configuration comes from environment variables; for local
-development a `.env` file in the working directory is loaded
-automatically (documented behaviour — see `.env.example` for every
-option with safe placeholders). Secrets are held as Pydantic
-`SecretStr` values and never hardcoded.
+Configuration is supplied through environment variables. A local `.env` file is loaded for development; see `.env.example` for the available settings.
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `APP_ENV` | `development` | `development` \| `test` \| `production` |
-| `GATEWAY_PROVIDER` | `mock` | `mock` \| `openai` \| `anthropic` |
-| `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` | — | provider credential (required for that provider in production) |
-| `GATEWAY_AUDIT_HMAC_KEY` | dev-only fallback | audit MAC key; **min. 32 chars and required in production** |
-| `GATEWAY_ADMIN_API_KEY` | unset | enables + protects the audit endpoints |
-| `GATEWAY_AUDIT_DB` | `audit_log.db` | SQLite audit database path |
-| `GATEWAY_AUDIT_CHECKPOINT` | unset | external checkpoint file path (enables tail verification) |
-| `GATEWAY_POLICY_FILE` | built-in default | JSON entity→action policy override |
-| `GATEWAY_SCORE_THRESHOLD` | `0.4` | minimum detector confidence (0–1) |
-| `GATEWAY_RESPONSE_SCAN` | `false` | scan/redact provider-generated PII in responses |
-| `GATEWAY_AUDIT_STORE_REDACTED_CONTENT` | `false` | research mode: store irreversibly redacted content in audit records |
+| `APP_ENV` | `development` | `development`, `test`, or `production` |
+| `GATEWAY_PROVIDER` | `mock` | `mock`, `openai`, or `anthropic` |
+| `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` | - | Provider credential when the corresponding provider is selected |
+| `GATEWAY_AUDIT_HMAC_KEY` | Development-only fallback | HMAC key; required and validated in production |
+| `GATEWAY_ADMIN_API_KEY` | unset | Enables and protects audit administration endpoints |
+| `GATEWAY_AUDIT_DB` | `audit_log.db` | SQLite audit-database path |
+| `GATEWAY_AUDIT_CHECKPOINT` | unset | Checkpoint store path used for tail verification |
+| `GATEWAY_POLICY_FILE` | Built-in default | JSON entity-to-action policy override |
+| `GATEWAY_SCORE_THRESHOLD` | `0.4` | Minimum PII-detector confidence |
+| `GATEWAY_RESPONSE_SCAN` | `false` | Enables best-effort response PII scanning/redaction |
+| `GATEWAY_AUDIT_STORE_REDACTED_CONTENT` | `false` | Research-only mode for storing redacted content |
 
-**Startup refusals.** With `APP_ENV=production` the gateway refuses to
-start when the HMAC key is missing, empty, shorter than 32 characters,
-or equal to the published development key; when the selected provider's
-API key is missing; or when any value (threshold, provider, policy
-action) is invalid. The insecure development key is accepted only in
-`development`/`test`.
+### Production startup validation
 
-### Policy actions
+With `APP_ENV=production`, the gateway refuses to start when required security configuration is invalid, including an absent or unsafe HMAC key, a missing credential for the selected live provider, or invalid provider/policy/threshold configuration.
+
+## Policy actions
+
+Example policy:
 
 ```json
-{"PERSON": "tokenize", "UK_NINO": "redact", "CREDIT_CARD": "block", "DATE_TIME": "allow"}
+{
+  "PERSON": "tokenize",
+  "UK_NINO": "redact",
+  "CREDIT_CARD": "block",
+  "DATE_TIME": "allow"
+}
 ```
 
-* `allow` — value passes to the provider unchanged; the detection is
-  still recorded, so the audit trail shows PII knowingly crossed the
-  boundary.
-* `tokenize` — replaced by `[[PGW_<8-hex>_<TYPE>_<n>]]`. The namespace
-  is random per request; the mapping lives only in request memory and is
-  restored only in the response to the caller.
-* `redact` — replaced by `[REDACTED:<TYPE>]`, unrecoverable everywhere.
-* `block` — the whole request is rejected with HTTP 400 and error code
-  `privacy_policy_blocked`; the provider is never contacted; only entity
-  *types* are recorded.
+- `allow` - the original value can cross the provider boundary and the decision is recorded.
+- `tokenize` - replaces the detected value with a request-scoped token such as `[[PGW_<8-hex>_<TYPE>_<n>]]`.
+- `redact` - replaces the value with `[REDACTED:<TYPE>]`.
+- `block` - rejects the complete request before provider contact.
 
-Default policy: PERSON, EMAIL_ADDRESS, PHONE_NUMBER, LOCATION,
-IP_ADDRESS → tokenize; UK_NINO, IBAN_CODE → redact; CREDIT_CARD,
-US_SSN → block; DATE_TIME → allow.
+For tokenisation, the random namespace and mapping exist only for the current request. Restoration uses exact current-request tokens, and the request-scoped mapping is cleared when processing terminates, including failure paths.
 
-## Running
+Default policy:
+
+- `PERSON`, `EMAIL_ADDRESS`, `PHONE_NUMBER`, `LOCATION`, `IP_ADDRESS` -> `tokenize`
+- `UK_NINO`, `IBAN_CODE` -> `redact`
+- `CREDIT_CARD`, `US_SSN` -> `block`
+- `DATE_TIME` -> `allow`
+
+## Running the gateway
+
+Offline demonstration:
 
 ```bash
-python demo.py                 # offline end-to-end walkthrough
-python -m gateway.gateway_api  # start the gateway on 127.0.0.1:8000
+python demo.py
 ```
+
+Start the API:
+
+```bash
+python -m gateway.gateway_api
+```
+
+Default development address:
+
+```text
+http://127.0.0.1:8000
+```
+
+Example request:
 
 ```bash
 curl http://127.0.0.1:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -d '{"model": "gpt-4o-mini",
-       "messages": [{"role": "user", "content": "Email john.smith@example.com about the invoice."}]}'
+  -d '{"model":"gpt-4o-mini","messages":[{"role":"user","content":"Email john.smith@example.com about the invoice."}]}'
 ```
 
-### API surface (limited, strictly validated)
+## API surface
 
 | Endpoint | Purpose |
 |---|---|
-| `POST /v1/chat/completions` | mediated, audited text chat proxy |
-| `GET /v1/audit/entries?limit=&offset=` | paginated audit records (admin key required) |
-| `GET /v1/audit/verify` | chain verification incl. checkpoint status (admin key required) |
-| `GET /health` | liveness + configured provider |
+| `POST /v1/chat/completions` | Mediated and audited text-chat request |
+| `GET /v1/audit/entries?limit=&offset=` | Paginated audit metadata; admin credential required |
+| `GET /v1/audit/verify` | Audit-chain and checkpoint verification; admin credential required |
+| `GET /health` | Liveness and configured-provider information |
 
-Supported request fields: `model`, `messages` (roles
-system/user/assistant, plain-text content only), `temperature`,
-`max_tokens`, `metadata` (small, not forwarded, not audited),
-`rehydrate`. **Everything else is rejected with HTTP 422**, including
-`stream`, `tools`, `tool_choice`, `functions`, `function_call`, and
-structured (image/audio) content. Limits: ≤50 messages, ≤20 000 chars
-per message, ≤60 000 chars total.
+The prototype accepts a deliberately restricted request schema. Unsupported features such as streaming, tools/functions, and structured image/audio content are rejected rather than silently ignored.
 
-Every completion response carries `X-Gateway-Request-Id` and
-`X-Audit-Entry-Id` headers linking it to its audit record.
+Every successful completion response includes `X-Gateway-Request-Id` and `X-Audit-Entry-Id` headers.
 
-### Administrative audit access
+## Administrative audit access
 
-The audit endpoints are **disabled** unless `GATEWAY_ADMIN_API_KEY` is
-set; requests must present it in the `X-Admin-Api-Key` header
-(constant-time comparison; 403 when disabled, 401 on bad credential).
-Responses are paginated (max 200/page) and never include content fields.
+Audit administration endpoints are disabled unless `GATEWAY_ADMIN_API_KEY` is configured.
 
-## Audit log design (accurate terminology)
+Requests must provide the credential in:
 
-Each record stores `(id, schema_version, timestamp, payload, prev_hash,
-record_hash, record_mac)`:
+```text
+X-Admin-Api-Key
+```
 
-* `record_hash = SHA-256(id | schema_version | timestamp |
-  canonical_payload | prev_hash)` — deterministic UTF-8 canonical JSON,
-  stable field order, stable UTC timestamps.
-* `record_mac = HMAC-SHA-256(key, record_hash)` — **keyed integrity
-  verification**, checked with `hmac.compare_digest`.
-
-**What HMAC gives you (and what it does not).** SHA-256 produces a
-content fingerprint; HMAC-SHA-256 authenticates it under a shared
-secret. Anyone holding the secret can produce a valid MAC, so the log
-is *tamper-evident to a verifier who holds the key*. It is **not** a
-digital signature: there is no public verifiability and no
-non-repudiation. Protecting `GATEWAY_AUDIT_HMAC_KEY` is essential.
-
-**Detects:** modification of retained records, reordering, interior
-deletion, insertion, and re-hashing without the key.
-**Cannot detect internally:** deletion of the newest record(s),
-deletion of the whole database, or rollback to an older valid copy — a
-truncated chain is still a valid chain. `verify_chain()` reports these
-honestly (`valid` with `tail_verified: false`) instead of pretending.
-Configure `GATEWAY_AUDIT_CHECKPOINT` to store an external checkpoint
-(latest record id + MAC) after every append; verification against it
-detects tail deletion and rollback up to the checkpoint. The bundled
-file-based store demonstrates the mechanism only — a real deployment
-must hold checkpoints in a separate trust domain.
-
-SQLite appends run inside `BEGIN IMMEDIATE` transactions with busy
-timeout and retry, so concurrent writers cannot fork the chain or
-duplicate ids. SQLite is adequate for this single-host prototype, not
-for a distributed deployment.
+Credential comparison uses constant-time comparison. Audit responses are paginated and do not expose complete prompt or response content.
 
 ## Fail-closed behaviour
 
-If PII detection, policy evaluation, or sanitization fails for any
-reason, the request stops **before** the provider boundary and returns
-`PGW-DETECTOR-FAILURE`; the raw prompt is never forwarded unmediated.
-Provider failures are mapped to fixed safe codes
-(`PGW-PROVIDER-TIMEOUT`, `PGW-PROVIDER-AUTH`, `PGW-PROVIDER-RESPONSE`)
-— raw provider exception text is never persisted or returned. The
-trade-off: a detector outage makes the gateway unavailable rather than
-unsafe; for this system privacy is prioritised over availability.
+### Request-side privacy failures
 
-## Tests and quality tooling
+If PII detection, policy evaluation, or request mediation fails before provider contact, processing stops and the raw request is not forwarded unmediated.
+
+The design therefore prioritises confidentiality over availability for privacy-critical request-side failures.
+
+### Provider failures
+
+Provider errors are mapped to stable safe error codes such as:
+
+```text
+PGW-PROVIDER-TIMEOUT
+PGW-PROVIDER-AUTH
+PGW-PROVIDER-RESPONSE
+```
+
+Raw provider exception text is not returned to the caller or persisted as audit content.
+
+### Response-scan failure
+
+If optional response scanning is enabled and fails **after the provider has already been contacted**, the provider response is withheld from the client.
+
+The failure is represented using:
+
+```text
+PGW-RESPONSE-SCAN-FAILURE
+```
+
+The corresponding audit outcome records that provider contact occurred but that the failed response was not returned. This distinguishes a post-provider response-processing failure from a request-side fail-closed event.
+
+## Audit log design
+
+Each audit record stores fields including:
+
+```text
+id
+schema_version
+timestamp
+payload
+prev_hash
+record_hash
+record_mac
+```
+
+Conceptually:
+
+```text
+record_hash = SHA-256(id | schema_version | timestamp | canonical_payload | prev_hash)
+record_mac  = HMAC-SHA-256(key, record_hash)
+```
+
+HMAC provides keyed integrity verification. It is **not** a digital signature and does not provide public verifiability or non-repudiation.
+
+### Internal chain detection
+
+Within the documented threat model, the authenticated chain can detect manipulation such as modification of retained record data, predecessor alteration, reordering, interior deletion, unauthorised re-hashing, and verification with the wrong HMAC key.
+
+### Checkpoints and tail verification
+
+An internally valid hash chain cannot by itself establish that the newest records have not been deleted or that the database has not been rolled back to an older valid state.
+
+Checkpoint comparison is therefore used to test tail deletion, complete database deletion, and rollback to an older valid database.
+
+A **valid but stale checkpoint** authenticates the historical state represented by that checkpoint, but it does **not** verify the current audit tail. The verifier therefore distinguishes historical checkpoint validity from current-tail verification.
+
+The bundled file-based checkpoint store is a research demonstration. A production deployment would require checkpoint protection in a separate trust domain.
+
+SQLite appends use transactional write handling appropriate to the single-host prototype. SQLite is not presented as a distributed audit-store architecture.
+
+## Tests and quality checks
+
+Run the automated suite:
 
 ```bash
-pytest                          # 162 tests (unit / integration / security)
-pytest --cov --cov-report=term  # with coverage (gate: 85%; currently ~96%)
-ruff check .                    # lint
-ruff format --check .           # formatting
-mypy                            # static types (gateway package)
+pytest
+```
+
+Run with coverage:
+
+```bash
+pytest --cov --cov-report=term
+```
+
+Run the remaining quality checks:
+
+```bash
+ruff check .
+ruff format --check .
+mypy
 bandit -c pyproject.toml -r gateway
 ```
 
-No live provider calls anywhere in the suite — provider adapters are
-tested through `httpx.MockTransport` and the offline mock. All PII in
-fixtures is synthetic. CI (GitHub Actions) runs all of the above on
-Python 3.11 and 3.12.
+Final evaluated results:
+
+```text
+165 tests passed
+96.10% statement coverage
+Ruff lint passed
+Ruff formatting passed
+Mypy: no issues in 11 source files
+Bandit: no findings
+```
+
+The configured coverage gate is 85%.
+
+No live provider calls are required by the test suite; provider adapters are exercised through mock transports and the offline mock provider.
+
+## Reproducing the dissertation evaluations
+
+The repository contains four dedicated evaluation utilities:
+
+```bash
+python evaluation/run_detection_evaluation.py
+python evaluation/run_leakage_evaluation.py
+python evaluation/run_latency_benchmark.py
+python evaluation/run_audit_attack_evaluation.py
+```
+
+The evaluation utilities write machine-readable result artefacts containing environment/configuration information and source-version provenance. See [`docs/EVALUATION_GUIDE.md`](docs/EVALUATION_GUIDE.md) for the repository's detailed evaluation procedure and any optional command-line settings.
+
+For strict reproduction of the dissertation's published measurements, first check out the frozen evaluated implementation:
+
+```bash
+git checkout 0c047e040ea745509f894fb5ffca86968ae985f6
+```
+
+Then recreate the documented environment, install the dependencies, and run the test, quality, and evaluation commands above.
+
+Performance values can vary across hardware and operating systems. The dissertation therefore treats the recorded latency values as measurements from the documented evaluation environment, not universal timings.
+
+## Final dissertation evaluation results
+
+### PII detection
+
+Across 24 synthetic labelled cases:
+
+```text
+TP = 26
+FP = 8
+FN = 2
+
+Precision = 0.7647
+Recall    = 0.9286
+F1        = 0.8387
+```
+
+The two false negatives were labelled `PHONE_NUMBER` values. Detection quality varies by entity type and the aggregate metrics should not be interpreted as a guarantee for unseen data.
+
+### Leakage evaluation
+
+Across 112 explicit checks:
+
+```text
+Mediation failures:                  0
+Detector false-negative appearances: 4
+Explicitly allowed appearances:      2
+Audit-store findings:                0
+Log findings:                        0
+Error-response findings:             0
+```
+
+The four false-negative appearances were caused by two missed telephone values, each observed at the mock-provider boundary and application output.
+
+The defensible conclusion is:
+
+> No detected value assigned a protective action bypassed mediation in the evaluated cases; however, detector false negatives can still cross the provider boundary.
+
+### Latency
+
+For a 121-character synthetic prompt, 50 measured iterations were recorded after five warm-up iterations using the offline mock provider:
+
+| Configuration | Median (ms) | p95 (ms) |
+|---|---:|---:|
+| Mock provider only | 2.02 | 2.72 |
+| Detection only | 9.01 | 14.51 |
+| Detection + tokenisation | 7.65 | 12.20 |
+| Full gateway + audit | 19.08 | 26.69 |
+
+These figures measure local prototype overhead only.
+
+### Audit integrity
+
+Thirteen audit-integrity scenarios were evaluated and all produced the documented expected outcomes.
+
+Modification, reordering, and interior-deletion scenarios were detected by internal verification. Tail deletion, complete deletion, and rollback required checkpoint comparison.
+
+The stale-checkpoint test confirmed that an older valid checkpoint can authenticate historical state without verifying the current tail.
 
 ## Known limitations
 
-* **Detection is statistical.** Presidio misses entities (false
-  negatives); anything undetected is forwarded untouched regardless of
-  policy. See docs/SECURITY_GUARANTEES.md for exactly what is and is
-  not claimed.
-* Providers can generate *new* PII in responses. By default responses
-  are returned as received (only hashes are audited);
-  `GATEWAY_RESPONSE_SCAN=true` enables best-effort redaction of
-  detected entities in responses.
-* The optional redacted-content audit mode
-  (`GATEWAY_AUDIT_STORE_REDACTED_CONTENT=true`) stores text that has
-  been irreversibly redacted **for detected entities only** — redacted
-  text can still contain undetected sensitive information. Off by
-  default; leave it off unless you need it for research.
-* Tail deletion / rollback of the audit database is only detectable
-  against an external checkpoint (see above).
-* English-language detection only; text-only (no image/audio) in v1.
-* Supported providers: OpenAI-compatible `/chat/completions` endpoints
-  and the Anthropic Messages API, via adapters; other providers require
-  a new adapter.
+- **PII detection is probabilistic.** Undetected values are not mediated by policy.
+- **Explicitly allowed PII can cross the provider boundary by design.**
+- Providers may generate new PII in responses. Optional response scanning is best effort rather than a complete guarantee.
+- Research-only redacted-content audit mode can still retain undetected sensitive information and is disabled by default.
+- Tail deletion and rollback require a sufficiently protected external checkpoint.
+- HMAC security depends on protection of the shared secret.
+- The prototype is English-focused and text-only.
+- Streaming, tools/function calling, multimodal content, and distributed deployment are outside the implemented scope.
+- The main evaluation used synthetic data and an offline mock provider.
+- The prototype was not evaluated with real patient data, a live healthcare organisation, or production-scale workloads.
+
+## Research interpretation
+
+This project should not be interpreted as claiming invention of PII detection, tokenisation, LLM gateway mediation, hash chaining, or HMAC.
+
+Its contribution is the **engineering integration and evaluation** of configurable per-entity PII mediation, request-scoped reversible tokenisation, provider abstraction, privacy-minimised auditing, HMAC-authenticated hash chaining, and explicit checkpoint semantics within one self-hosted research prototype.
